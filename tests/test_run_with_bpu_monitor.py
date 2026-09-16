@@ -96,7 +96,7 @@ class BpuMonitorTests(unittest.TestCase):
                 import time
                 time.sleep(0.15)
                 child_pid = int(pid_file.read_text(encoding="utf-8").strip())
-                os.killpg(process.pid, signal.SIGTERM)
+                os.kill(process.pid, signal.SIGTERM)
                 process.wait(timeout=2)
                 process.communicate(timeout=1)
                 self.assertNotEqual(process.returncode, 0)

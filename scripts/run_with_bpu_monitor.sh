@@ -47,9 +47,14 @@ fi
 mkdir -p "$(dirname "$log_path")"
 : > "$log_path"
 
-samples_file="$(mktemp)"
-stream_fifo="$(mktemp -u)"
-mkfifo "$stream_fifo"
+temp_dir="$(mktemp -d)" || { echo "Unable to create temporary directory" >&2; exit 1; }
+samples_file="$temp_dir/samples"
+stream_fifo="$temp_dir/stream"
+if ! mkfifo "$stream_fifo"; then
+  echo "Unable to create stream FIFO: $stream_fifo" >&2
+  rm -rf "$temp_dir"
+  exit 1
+fi
 command_pid=""
 monitor_pid=""
 aggregator_pid=""
@@ -69,7 +74,10 @@ cleanup() {
   kill_command
   if [[ -n "$monitor_pid" ]]; then kill "$monitor_pid" 2>/dev/null || true; fi
   if [[ -n "$aggregator_pid" ]]; then kill "$aggregator_pid" 2>/dev/null || true; fi
-  rm -f "$samples_file" "$stream_fifo"
+  if [[ -n "$command_pid" ]]; then wait "$command_pid" 2>/dev/null || true; fi
+  if [[ -n "$monitor_pid" ]]; then wait "$monitor_pid" 2>/dev/null || true; fi
+  if [[ -n "$aggregator_pid" ]]; then wait "$aggregator_pid" 2>/dev/null || true; fi
+  rm -rf "$temp_dir"
 }
 trap cleanup EXIT
 
@@ -103,7 +111,6 @@ run_session() {
   ) &
   monitor_pid=$!
 
-  trap 'kill "$monitor_pid" 2>/dev/null || true' INT TERM EXIT
   wait "$command_pid"
   command_status=$?
   command_pid=""
