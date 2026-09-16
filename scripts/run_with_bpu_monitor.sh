@@ -48,28 +48,46 @@ mkdir -p "$(dirname "$log_path")"
 : > "$log_path"
 
 samples_file="$(mktemp)"
-output_file="$(mktemp)"
+stream_fifo="$(mktemp -u)"
+mkfifo "$stream_fifo"
 command_pid=""
 monitor_pid=""
+aggregator_pid=""
 interrupted=0
 
+kill_command() {
+  local child_pid
+  [[ -z "$command_pid" ]] && return 0
+  while read -r child_pid; do
+    [[ -n "$child_pid" ]] || continue
+    kill -KILL "$child_pid" 2>/dev/null || true
+  done < <(pgrep -P "$command_pid" 2>/dev/null || true)
+  kill -KILL "$command_pid" 2>/dev/null || true
+}
+
 cleanup() {
-  if [[ -n "$command_pid" ]]; then kill "$command_pid" 2>/dev/null || true; fi
+  kill_command
   if [[ -n "$monitor_pid" ]]; then kill "$monitor_pid" 2>/dev/null || true; fi
-  rm -f "$samples_file" "$output_file"
+  if [[ -n "$aggregator_pid" ]]; then kill "$aggregator_pid" 2>/dev/null || true; fi
+  rm -f "$samples_file" "$stream_fifo"
 }
 trap cleanup EXIT
 
 on_signal() {
   interrupted=1
-  if [[ -n "$command_pid" ]]; then kill "$command_pid" 2>/dev/null || true; fi
+  kill_command
   if [[ -n "$monitor_pid" ]]; then kill "$monitor_pid" 2>/dev/null || true; fi
+  if [[ -n "$aggregator_pid" ]]; then kill "$aggregator_pid" 2>/dev/null || true; fi
+  exit 143
 }
 trap on_signal INT TERM
 
+tee -a "$log_path" < "$stream_fifo" &
+aggregator_pid=$!
+
 run_session() {
   local command_status
-  "$@" >"$output_file" 2>&1 &
+  "$@" >"$stream_fifo" 2>&1 &
   command_pid=$!
 
   (
@@ -78,7 +96,7 @@ run_session() {
       if [[ "$ratio" =~ ^[0-9]+$ ]]; then
         line="$(printf '%s [BPU] ratio=%s%%' "$(date --iso-8601=milliseconds)" "$ratio")"
         printf '%s\n' "$line" >> "$samples_file"
-        printf '%s\n' "$line" | tee -a "$log_path"
+        printf '%s\n' "$line" > "$stream_fifo"
       fi
       sleep "$interval"
     done
@@ -88,15 +106,17 @@ run_session() {
   trap 'kill "$monitor_pid" 2>/dev/null || true' INT TERM EXIT
   wait "$command_pid"
   command_status=$?
-  wait "$monitor_pid" 2>/dev/null || true
   command_pid=""
+  kill "$monitor_pid" 2>/dev/null || true
+  wait "$monitor_pid" 2>/dev/null || true
   monitor_pid=""
+  wait "$aggregator_pid" 2>/dev/null || true
+  aggregator_pid=""
   return "$command_status"
 }
 
 run_session "$@"
 command_status=$?
-cat "$output_file" | tee -a "$log_path"
 
 awk -F'ratio=|%' '
   {

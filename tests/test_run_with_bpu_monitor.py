@@ -1,5 +1,6 @@
 from pathlib import Path
 import os
+import signal
 import subprocess
 import tempfile
 import unittest
@@ -77,28 +78,31 @@ class BpuMonitorTests(unittest.TestCase):
             ratio_file = tmp_path / "ratio"
             ratio_file.write_text("37\n", encoding="utf-8")
             log = tmp_path / "combined.log"
-            marker = tmp_path / "marker"
+            pid_file = tmp_path / "child.pid"
             env = os.environ.copy()
             env["BPU_RATIO_FILE"] = str(ratio_file)
             process = subprocess.Popen(
                 [
                     "bash", str(SCRIPT), "--log", str(log), "--interval", "0.02", "--",
-                    "bash", "-c", f"trap 'echo orphan > {marker}' TERM; sleep 10",
+                    "bash", "-c", f"echo $$ > {pid_file}; sleep 10",
                 ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
                 env=env,
+                start_new_session=True,
             )
             try:
                 import time
                 time.sleep(0.15)
-                process.terminate()
+                child_pid = int(pid_file.read_text(encoding="utf-8").strip())
+                os.killpg(process.pid, signal.SIGTERM)
                 process.wait(timeout=2)
                 process.communicate(timeout=1)
                 self.assertNotEqual(process.returncode, 0)
                 time.sleep(0.15)
-                self.assertFalse(marker.exists())
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(child_pid, 0)
             finally:
                 if process.poll() is None:
                     process.kill()
