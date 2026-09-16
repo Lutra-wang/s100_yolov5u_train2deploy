@@ -49,6 +49,19 @@ class ManualStructureTests(unittest.TestCase):
         self.assertTrue(image.is_file())
         self.assertIn("![项目架构图](images/S0-01-project-architecture.jpg)", self.text)
 
+    def test_dataset_path_is_adapted_to_current_clone(self):
+        self.assertIn(
+            'sed -i "s|^path:.*|path: $DATASET_ROOT|" '
+            '"$DATASET_ROOT/dataset.yaml"',
+            self.text,
+        )
+        self.assertNotIn("/home/lutra/OE_S100", self.text)
+
+    def test_training_uses_fixed_run_directory(self):
+        self.assertIn("exist_ok=True", self.text)
+        self.assertIn('RUN="$TRAIN_ROOT/runs/coco2017_val128_s100"', self.text)
+        self.assertNotIn("| sort | tail -1", self.text)
+
 
 if __name__ == "__main__":
     unittest.main()

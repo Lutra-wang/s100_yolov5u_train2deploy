@@ -101,9 +101,11 @@ python -m pip install -e "$ULTRALYTICS_ROOT" pycocotools onnx
 # 只列出本阶段必需的数据配置和标注，确认克隆内容完整。
 ls -l "$DATASET_ROOT/dataset.yaml" \
   "$DATASET_ROOT/annotations/instances_test.json"
+# 只把 YAML 顶层 path 改为当前克隆的数据集绝对路径。
+sed -i "s|^path:.*|path: $DATASET_ROOT|" "$DATASET_ROOT/dataset.yaml"
 ```
 
-如果任一文件不存在，请先更新项目仓库，不要自行改用其他数据集。
+仓库中的 YAML 保留了制作数据时的源路径，因此训练前必须将 `path:` 适配为当前 `$DATASET_ROOT`。如果任一文件不存在，请先更新项目仓库，不要自行改用其他数据集。
 
 ### 1.3 训练 YOLOv5nu
 
@@ -117,14 +119,13 @@ yolo detect train \
   model=yolov5nu.pt data="$DATASET_ROOT/dataset.yaml" \
   imgsz=640 epochs=10 batch=8 workers=0 device=cpu \
   project="$TRAIN_ROOT/runs" name=coco2017_val128_s100 \
-  seed=20260915 deterministic=True
+  seed=20260915 deterministic=True exist_ok=True
 
-# 重复训练可能产生数字后缀；始终取排序后最后一个实际运行目录。
-RUN="$(find "$TRAIN_ROOT/runs" -mindepth 1 -maxdepth 1 -type d \
-  -name 'coco2017_val128_s100*' | sort | tail -1)"
+# exist_ok=True 将输出稳定在同一目录，后续命令不需要猜测数字后缀。
+RUN="$TRAIN_ROOT/runs/coco2017_val128_s100"
 ```
 
-本步生成 `$RUN/weights/best.pt`；这是后续评估和导出使用的最优权重。若 `RUN` 为空，先回看训练终端的首个报错。
+本步生成 `$RUN/weights/best.pt`；这是后续评估和导出使用的最优权重。若该文件未生成，先回看训练终端的首个报错。
 
 <!-- IMAGE_SLOT:S1-01 -->
 > **待补图 S1-01｜训练完成结果**
