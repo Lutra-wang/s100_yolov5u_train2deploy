@@ -4,7 +4,7 @@
 
 ![项目架构图](images/S0-01-project-architecture.jpg)
 
-本篇先完成 Stage 0–2：获取项目，训练 YOLOv5nu，建立 FP32 基线，导出六路 ONNX，再用 OpenExplorer 3.7.0 生成 `yolov5nu_s100_nv12.hbm`。开始前，请确认开发主机已安装 Linux 或 WSL、Conda、Docker、Git 和 `wget`。
+本篇完成从训练到 S100 部署的完整链路：训练 YOLOv5nu，建立 FP32 基线，导出六路 ONNX，用 OpenExplorer 3.7.0 生成 `yolov5nu_s100_nv12.hbm`，再在板端检测、评估精度和测试性能。开始前，请确认开发主机已安装 Linux 或 WSL、Conda、Docker、Git 和 `wget`。
 
 ## Stage 0：项目与基础环境
 
@@ -296,3 +296,183 @@ grep -E 'output0|371|379|387|395|403' /data/conversion/output/hb_compile.log
 ### 2.5 RoboGo 量化
 
 RoboGo 量化将在后续补充截图和经验证的平台流程。
+
+## Stage 3：S100 板端部署
+
+### 3.1 配置板端部署环境
+
+执行位置：先在 OE 容器执行 `exit` 回到开发主机终端，再通过 SSH 在 S100 安装依赖。S100 应已启动配套系统，具备 BPU 运行时和模型运行测试工具 `hrt_model_exec`，并与主机网络互通。将 `<S100_IP>` 替换为板卡实际 IP。
+
+```bash
+export S100_HOST="root@<S100_IP>"
+export BOARD_ROOT="/root/s100_yolov5u_train2deploy"
+# 在 S100 安装一次推理与 COCO 评估所需依赖。
+ssh "$S100_HOST" "python3 -m pip install numpy pycocotools"
+```
+
+### 3.2 上传部署文件
+
+执行位置：开发主机。复用 Stage 1 的 `PROJECT_ROOT`、`DATASET_ROOT`、`MODEL_ZOO_ROOT`。
+
+```bash
+ssh "$S100_HOST" "mkdir -p '$BOARD_ROOT/output'"
+scp -r "$MODEL_ZOO_ROOT/samples/Vision/ultralytics_yolo/py" \
+  "$S100_HOST:$BOARD_ROOT/"
+scp "$PROJECT_ROOT/conversion/output/yolov5nu_s100_nv12.hbm" \
+  "$PROJECT_ROOT/scripts/run_model_zoo_bpu_subset.py" \
+  "$PROJECT_ROOT/scripts/evaluate_coco_official.py" \
+  "$PROJECT_ROOT/scripts/run_with_bpu_monitor.sh" \
+  "$DATASET_ROOT/annotations/instances_test.json" \
+  "$S100_HOST:$BOARD_ROOT/"
+scp -r "$DATASET_ROOT/images/test" "$S100_HOST:$BOARD_ROOT/"
+# 登录后，后续 3.3–3.6 的命令均在 S100 执行。
+ssh "$S100_HOST"
+```
+
+板端项目目录现在包含 `py/`、HBM、三个辅助脚本、`instances_test.json`、16 张测试图所在的 `test/` 和 `output/`。本阶段的检测图、评估 JSON 和性能日志全部保留在 S100 的 `output/`，直接在板端查看。
+
+### 3.3 查看模型信息
+
+执行位置：S100。`hrt_model_exec` 是板端模型运行与测试工具；`model_info` 用于读取 HBM 的输入输出信息。
+
+```bash
+cd /root/s100_yolov5u_train2deploy
+hrt_model_exec model_info --model_file ./yolov5nu_s100_nv12.hbm \
+  | tee ./output/model_info.log
+```
+
+检查输入为 NV12 的 `images_y`、`images_uv`，对应 640×640 图像，输出与 1.5 的六路 cls/bbox 一致。终端内容同时写入 `output/model_info.log`。
+
+<!-- IMAGE_SLOT:S3-01 -->
+> **待补图 S3-01｜板端模型信息**
+> 建议文件：`docs/images/S3-01-model-info.png`
+> 截图内容：S100 终端的 NV12 双输入与六路输出信息。
+> 图注：HBM 的输入输出与导出、编译配置一致。
+
+### 3.4 单张图片检测
+
+执行位置：S100 / `/root/s100_yolov5u_train2deploy`。
+
+```bash
+python3 -m py.rdk_yolo_app \
+  --model-path ./yolov5nu_s100_nv12.hbm \
+  --source ./test/000000000632.jpg \
+  --workspace ./output/single_image \
+  --mode default --yolo-type yolov5u --model-type detect \
+  --score-thres 0.25 --nms-thres 0.7
+```
+
+Model Zoo 完成图片预处理、BPU 推理、解码和 NMS，检测图保存为 `output/single_image/000000000632.jpg_result.jpg`。在板端图像查看器中打开，检查框的位置与类别；单图用于直观核对，精度以接下来的固定测试集评估为准。
+
+<!-- IMAGE_SLOT:S3-02 -->
+> **待补图 S3-02｜单图检测结果**
+> 建议文件：`docs/images/S3-02-detection-result.jpg`
+> 截图内容：板端输出的检测图及目标框、类别与分数。
+> 图注：S100 上的 YOLOv5nu 单图检测结果。
+
+### 3.5 运行板端精度评估
+
+执行位置：S100 / `/root/s100_yolov5u_train2deploy`。使用同一组 16 张测试图、score 0.25 和 NMS IoU 0.7；子集脚本复用 Model Zoo 检测器，监控脚本同步记录 Python 应用输出和 BPU 采样。
+
+```bash
+bash ./run_with_bpu_monitor.sh \
+  --log ./output/bpu_inference.log \
+  --interval 0.2 \
+  -- \
+  python3 ./run_model_zoo_bpu_subset.py \
+    --model-zoo-yolo-dir ./py \
+    --model-path ./yolov5nu_s100_nv12.hbm \
+    --source ./test \
+    --output ./output/bpu_result.txt \
+    --score-thres 0.25 \
+    --nms-thres 0.7
+```
+
+终端应显示 `images=16`，检测记录写入 `output/bpu_result.txt`。`output/bpu_inference.log` 同时包含带时间戳的 `[BPU] ratio=…%` 和结尾的 `[BPU_SUMMARY] samples=… average=… peak=…`；具体数值以本次板端实测为准。
+
+脚本优先读取 `/sys/devices/system/bpu/bpu0/ratio`，不可读时使用 `/sys/devices/system/bpu/ratio`。这是板级 BPU 利用率的采样值，其他 BPU 任务也会影响它。0.2 秒的采样间隔可能错过约 1.2 ms 的单次 BPU 任务，因此这里观察整个 16 图循环，不把某一次采样当作单图是否使用 BPU 的证明。汇总是整个 Python 应用运行期间采样值的均值与峰值，包含初始化、读图和前后处理期间；它不能换算为单图推理延迟。
+
+<!-- IMAGE_SLOT:S3-05 -->
+> **待补图 S3-05｜BPU 利用率日志**
+> 建议文件：`docs/images/S3-05-bpu-utilization-log.png`
+> 截图内容：同一次 16 图运行中的 `[BPU]` 采样、`images=16` 和 `[BPU_SUMMARY]`。
+> 图注：Python 推理应用运行期间的板级 BPU 采样；数值待板端实测补入。
+
+继续在 S100 将检测记录转换为 COCO 预测 JSON，再调用未修改的 `pycocotools` 评估：
+
+```bash
+python3 ./evaluate_coco_official.py bpu-to-json \
+  --bpu-text ./output/bpu_result.txt \
+  --annotations ./instances_test.json \
+  --output ./output/quantization_bpu_predictions.json
+python3 ./evaluate_coco_official.py evaluate \
+  --annotations ./instances_test.json \
+  --predictions ./output/quantization_bpu_predictions.json \
+  --metrics ./output/quantization_bpu_metrics.json
+```
+
+终端打印 COCO 指标和 JSON 汇总，`image_count` 应为 16；预测与指标均保存在板端 `output/`。mAP50-90 表示 IoU 0.50–0.90、步长 0.05 的 AP 均值。本项目已有参考实测记录见[精度评估](精度评估.md)：
+
+| 指标 | FP32 | S100 BPU |
+|---|---:|---:|
+| mAP50 | 0.388 | 0.414 |
+| mAP50-90 | 0.292 | 0.321 |
+| mAP50-95 | 0.266 | 0.293 |
+
+这里只使用 16 张图，抽样波动较大；量化扰动可能使阈值附近的候选框通过或落出筛选，Ultralytics 与 Model Zoo 的预处理、后处理差异也可能影响结果。因此本次 BPU 指标略高不能说明量化通常提升精度；重新训练和评估时，以当次输出为准。
+
+<!-- IMAGE_SLOT:S3-03 -->
+> **待补图 S3-03｜BPU 精度结果**
+> 建议文件：`docs/images/S3-03-bpu-metrics.png`
+> 截图内容：板端三项 mAP 与 `image_count=16` 的评估汇总。
+> 图注：与 FP32 使用相同测试图和阈值的 S100 BPU 精度评估。
+
+### 3.6 测试 BPU 性能
+
+执行位置：S100 / `/root/s100_yolov5u_train2deploy`。
+
+```bash
+hrt_model_exec perf --thread_num 1 --model_file ./yolov5nu_s100_nv12.hbm \
+  | tee ./output/perf_1thread.log
+hrt_model_exec perf --thread_num 2 --model_file ./yolov5nu_s100_nv12.hbm \
+  | tee ./output/perf_2thread.log
+```
+
+两次结果直接显示在板端终端，并分别保存到 `output/perf_1thread.log` 和 `output/perf_2thread.log`。已有参考记录每项 200 帧，见[延迟评估](延迟评估.md)：
+
+| 线程数 | 平均 BPU 任务延迟 | 吞吐 |
+|---:|---:|---:|
+| 1 | 1.233 ms | 794.452 FPS |
+| 2 | 1.867 ms / 线程 | 1053.081 FPS |
+
+`perf` 测量提交 BPU 任务到等待完成的运行时性能，不含读图、NV12 构造和 Python 后处理，不能视为完整业务的端到端延迟。两线程增加并发吞吐，单任务延迟也可能上升。3.5 的 `bpu_inference.log` 覆盖完整 Python 应用期间的日志与利用率采样；这里的任务延迟、吞吐和前面的利用率是不同指标。
+
+<!-- IMAGE_SLOT:S3-04 -->
+> **待补图 S3-04｜BPU 性能测试**
+> 建议文件：`docs/images/S3-04-bpu-performance.png`
+> 截图内容：板端一线程、两线程 perf 的延迟与吞吐结果。
+> 图注：HBM 的 BPU 任务性能，不包含 Python 应用前后处理。
+
+## Stage 4：结果总结
+
+| 阶段 | 执行位置 | 输入 | 输出 |
+|---|---|---|---|
+| 训练与 FP32 基线 | 开发主机 / Conda | 预训练权重、固定数据集 | `train/runs/coco2017_val128_s100/weights/best.pt`、`validation/quantization_fp32_metrics.json` |
+| 导出 | 开发主机 / Conda | `best.pt`、Model Zoo 导出脚本 | `exchange/onnx/yolov5nu_coco2017_val128_s100.onnx`，六路输出 |
+| 量化与编译 | OE 容器，项目挂载到 `/data` | 六路 ONNX、20 张校准图 | `conversion/output/yolov5nu_s100_nv12.hbm`、`hb_compile.log` |
+| 部署、评估与性能测试 | S100 / `/root/s100_yolov5u_train2deploy` | HBM、Model Zoo `py/`、辅助脚本、16 张测试图及标注 | 板端 `output/` 下的检测图、`model_info.log`、`bpu_result.txt`、`quantization_bpu_predictions.json`、`quantization_bpu_metrics.json`、`bpu_inference.log`、`perf_1thread.log`、`perf_2thread.log` |
+
+## QA：常见问题
+
+| 问题 | 排查与处理 |
+|---|---|
+| OE 下载中断或解压失败 | 使用 0.2 的 `wget -c` 续传；核对两个文件名和 3.7.0 版本，下载完成后重新解压。 |
+| `docker load` 失败 | 确认 Docker 服务已启动、当前用户有权限，镜像 tar 下载完整且磁盘空间足够；不要把工具链 tgz 当成镜像加载。 |
+| 容器中找不到 `/data` 下的文件 | 返回主机检查传给 `run_docker.sh` 的 `PROJECT_ROOT` 是否为本次克隆目录，并核对该目录下确有 ONNX 和校准图。 |
+| ONNX 不是六路输出 | 确认 1.5 使用 Model Zoo 的 `export_monkey_patch.py`，核对三组 cls/bbox 名称与形状，再重新量化；通用导出结果不能直接替代。 |
+| 校准图不是 20 张 | 核对训练集目录及 `.jpg` 扩展名；少于 20 张时检查数据完整性，多于 20 张时移出旧校准图，再按 2.1 的排序规则准备。 |
+| 未生成 HBM，或重命名时报源文件为空 | 从 `conversion/output/hb_compile.log` 查找首个编译错误，确认 ONNX、校准路径与 `nash-e` 配置；先取得编译成功日志及 NV12 HBM，再执行重命名。 |
+| SSH 或上传失败 | 核对 `S100_HOST` 中的 IP、主机与板卡网络、板端 SSH 服务及登录凭据；确认 `BOARD_ROOT` 可写，所有上传命令在主机执行。 |
+| 板端模块缺失或工具不可用 | 确认使用 S100 配套系统的 Python 与 BPU 运行时；`numpy`、`pycocotools` 在 3.1 安装。Model Zoo 入口会检查并尝试安装 `tqdm`、`scipy`、`numpy`、OpenCV，首次运行需能访问包源。若 `hrt_model_exec` 或 BPU 运行时缺失，应检查板端系统环境。 |
+| 检测框位置或类别明显不对 | 核对 HBM 的 NV12 输入、六路输出及 640×640 尺寸，保持 `yolov5u`、`detect` 和同一 Model Zoo 预处理/后处理；确认模型为本次训练编译产物。 |
+| FP32 与 BPU 的 mAP 不同 | 先核对同一组 16 张图与标注、score 0.25、NMS IoU 0.7、类别映射和同一权重链路；再考虑小样本波动、阈值附近量化变化及两套预处理/后处理差异。不要将本例数值推广为完整 COCO 精度结论。 |

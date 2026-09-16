@@ -62,6 +62,46 @@ class ManualStructureTests(unittest.TestCase):
         self.assertIn('RUN="$TRAIN_ROOT/runs/coco2017_val128_s100"', self.text)
         self.assertNotIn("| sort | tail -1", self.text)
 
+    def test_stage_three_four_and_qa_headings_are_present(self):
+        headings = [
+            "## Stage 3：S100 板端部署",
+            "### 3.1 配置板端部署环境",
+            "### 3.2 上传部署文件",
+            "### 3.3 查看模型信息",
+            "### 3.4 单张图片检测",
+            "### 3.5 运行板端精度评估",
+            "### 3.6 测试 BPU 性能",
+            "## Stage 4：结果总结",
+            "## QA：常见问题",
+        ]
+        for heading in headings:
+            with self.subTest(heading=heading):
+                self.assertIn(heading, self.text)
+
+    def test_board_inference_uses_bpu_monitor_without_pullback(self):
+        self.assertIn("run_with_bpu_monitor.sh", self.text)
+        self.assertIn("output/bpu_inference.log", self.text)
+        self.assertIn("[BPU_SUMMARY]", self.text)
+        self.assertIn("/sys/devices/system/bpu/bpu0/ratio", self.text)
+        self.assertNotIn('scp "$S100_HOST:$BOARD_ROOT/output', self.text)
+
+    def test_all_unfilled_image_slots_are_declared(self):
+        slots = (
+            "S1-01", "S1-02", "S1-03", "S2-01", "S2-02",
+            "S3-01", "S3-02", "S3-03", "S3-04", "S3-05",
+        )
+        for slot in slots:
+            with self.subTest(slot=slot):
+                self.assertEqual(self.text.count(f"<!-- IMAGE_SLOT:{slot} -->"), 1)
+
+    def test_reference_metrics_are_preserved(self):
+        for row in (
+            "| mAP50 | 0.388 | 0.414 |",
+            "| mAP50-90 | 0.292 | 0.321 |",
+            "| mAP50-95 | 0.266 | 0.293 |",
+        ):
+            self.assertIn(row, self.text)
+
 
 if __name__ == "__main__":
     unittest.main()
