@@ -1,0 +1,39 @@
+# Python and editor caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.vscode/
+.idea/
+
+# Downloaded archives and external source trees
+*.zip
+*.tar
+*.tgz
+data/_sources/
+model_zoo_s/
+train/ultralytics/
+oe
+
+# Generated model artifacts
+*.pt
+*.onnx
+*.hbm
+*.bc
+
+# Training, conversion, and board runtime outputs
+train/initial/
+train/runs/*
+!train/runs/README.md
+exchange/onnx/*
+!exchange/onnx/README.md
+conversion/.temporary_workspace/
+conversion/cal_images/
+conversion/mapper.log
+conversion/output/*
+!conversion/output/README.md
+board/output/*
+!board/output/README.md
+validation/fp32_ultralytics_test/
+
+# Dataset caches are reproducible
+data/coco2017_val128_s100/labels/*.cache
