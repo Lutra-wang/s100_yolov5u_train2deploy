@@ -85,6 +85,27 @@ class ManualStructureTests(unittest.TestCase):
         self.assertIn("/sys/devices/system/bpu/bpu0/ratio", self.text)
         self.assertNotIn('scp "$S100_HOST:$BOARD_ROOT/output', self.text)
 
+    def test_stage_three_defines_host_paths_before_upload(self):
+        stage_three = self.text.split("## Stage 3：S100 板端部署", 1)[1]
+        before_upload = stage_three.split("scp ", 1)[0]
+        for definition in (
+            'export S100_WORKSPACE="$HOME/s100-yolov5u-workspace"',
+            'export PROJECT_ROOT="$S100_WORKSPACE/s100_yolov5u_train2deploy"',
+            'export DATASET_ROOT="$PROJECT_ROOT/data/coco2017_val128_s100"',
+            'export MODEL_ZOO_ROOT="$PROJECT_ROOT/model_zoo_s"',
+        ):
+            with self.subTest(definition=definition):
+                self.assertIn(definition, before_upload)
+
+    def test_first_runtime_tool_explanation_distinguishes_subcommands(self):
+        first_explanation = next(
+            paragraph for paragraph in self.text.split("\n\n")
+            if "`hrt_model_exec`" in paragraph
+        )
+        self.assertRegex(first_explanation, r"`model_info`[^；。]*接口")
+        self.assertRegex(first_explanation, r"`perf`[^；。]*延迟[^；。]*吞吐")
+        self.assertIn("3.6", first_explanation)
+
     def test_all_unfilled_image_slots_are_declared(self):
         slots = (
             "S1-01", "S1-02", "S1-03", "S2-01", "S2-02",

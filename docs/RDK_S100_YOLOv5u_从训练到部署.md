@@ -301,9 +301,14 @@ RoboGo 量化将在后续补充截图和经验证的平台流程。
 
 ### 3.1 配置板端部署环境
 
-执行位置：先在 OE 容器执行 `exit` 回到开发主机终端，再通过 SSH 在 S100 安装依赖。S100 应已启动配套系统，具备 BPU 运行时和模型运行测试工具 `hrt_model_exec`，并与主机网络互通。将 `<S100_IP>` 替换为板卡实际 IP。
+执行位置：开发主机终端；若仍在 OE 容器内，先执行 `exit`。S100 应已启动配套系统，具备 BPU 运行时和模型运行测试工具 `hrt_model_exec`，并与主机网络互通；其中 `model_info` 查看模型输入输出接口，`perf` 测量模型运行时延迟与吞吐，在 3.6 使用。将 `<S100_IP>` 替换为板卡实际 IP。
 
 ```bash
+# 重建主机路径，便于从新终端继续执行。
+export S100_WORKSPACE="$HOME/s100-yolov5u-workspace"
+export PROJECT_ROOT="$S100_WORKSPACE/s100_yolov5u_train2deploy"
+export DATASET_ROOT="$PROJECT_ROOT/data/coco2017_val128_s100"
+export MODEL_ZOO_ROOT="$PROJECT_ROOT/model_zoo_s"
 export S100_HOST="root@<S100_IP>"
 export BOARD_ROOT="/root/s100_yolov5u_train2deploy"
 # 在 S100 安装一次推理与 COCO 评估所需依赖。
@@ -312,7 +317,7 @@ ssh "$S100_HOST" "python3 -m pip install numpy pycocotools"
 
 ### 3.2 上传部署文件
 
-执行位置：开发主机。复用 Stage 1 的 `PROJECT_ROOT`、`DATASET_ROOT`、`MODEL_ZOO_ROOT`。
+执行位置：开发主机。复用 3.1 定义的路径变量。
 
 ```bash
 ssh "$S100_HOST" "mkdir -p '$BOARD_ROOT/output'"
@@ -333,7 +338,7 @@ ssh "$S100_HOST"
 
 ### 3.3 查看模型信息
 
-执行位置：S100。`hrt_model_exec` 是板端模型运行与测试工具；`model_info` 用于读取 HBM 的输入输出信息。
+执行位置：S100。
 
 ```bash
 cd /root/s100_yolov5u_train2deploy
