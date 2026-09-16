@@ -44,12 +44,23 @@ if [[ ! -r "$ratio_file" ]]; then
   exit 1
 fi
 
-mkdir -p "$(dirname "$log_path")"
-: > "$log_path"
+if ! mkdir -p "$(dirname "$log_path")"; then
+  echo "Unable to create log directory: $(dirname "$log_path")" >&2
+  exit 1
+fi
+if ! : > "$log_path"; then
+  echo "Unable to initialize log: $log_path" >&2
+  exit 1
+fi
 
 temp_dir="$(mktemp -d)" || { echo "Unable to create temporary directory" >&2; exit 1; }
 samples_file="$temp_dir/samples"
 stream_fifo="$temp_dir/stream"
+if ! : > "$samples_file"; then
+  echo "Unable to initialize sample file" >&2
+  rm -rf "$temp_dir"
+  exit 1
+fi
 if ! mkfifo "$stream_fifo"; then
   echo "Unable to create stream FIFO: $stream_fifo" >&2
   rm -rf "$temp_dir"
@@ -58,6 +69,7 @@ fi
 command_pid=""
 monitor_pid=""
 aggregator_pid=""
+aggregator_status=0
 interrupted=0
 
 kill_command() {
@@ -102,7 +114,12 @@ run_session() {
     while kill -0 "$command_pid" 2>/dev/null; do
       ratio="$(tr -d '[:space:]' < "$ratio_file")"
       if [[ "$ratio" =~ ^[0-9]+$ ]]; then
-        line="$(printf '%s [BPU] ratio=%s%%' "$(date --iso-8601=milliseconds)" "$ratio")"
+        raw_timestamp="$(date '+%Y-%m-%dT%H:%M:%S.%N%:z')" || raw_timestamp=""
+        timestamp="${raw_timestamp:0:23}${raw_timestamp:29}"
+        if [[ ! "$timestamp" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}[+-][0-9]{2}:[0-9]{2}$ ]]; then
+          continue
+        fi
+        line="$timestamp [BPU] ratio=$ratio%"
         printf '%s\n' "$line" >> "$samples_file"
         printf '%s\n' "$line" > "$stream_fifo"
       fi
@@ -117,13 +134,14 @@ run_session() {
   kill "$monitor_pid" 2>/dev/null || true
   wait "$monitor_pid" 2>/dev/null || true
   monitor_pid=""
-  wait "$aggregator_pid" 2>/dev/null || true
+  wait "$aggregator_pid" 2>/dev/null || aggregator_status=$?
   aggregator_pid=""
   return "$command_status"
 }
 
 run_session "$@"
 command_status=$?
+summary_status=0
 
 awk -F'ratio=|%' '
   {
@@ -139,9 +157,17 @@ awk -F'ratio=|%' '
       print "[BPU_SUMMARY] samples=0 average=n/a peak=n/a"
   }
 ' "$samples_file" | tee -a "$log_path"
+pipeline_status=("${PIPESTATUS[@]}")
+summary_status=${pipeline_status[0]}
+if [[ "${pipeline_status[1]:-1}" -ne 0 ]]; then
+  summary_status=${pipeline_status[1]}
+fi
 
 if [[ "$interrupted" -eq 1 ]]; then
   exit 143
 fi
 
+if [[ "$command_status" -eq 0 && ( "$aggregator_status" -ne 0 || "$summary_status" -ne 0 ) ]]; then
+  exit 1
+fi
 exit "$command_status"

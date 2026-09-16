@@ -34,7 +34,9 @@ class BpuMonitorTests(unittest.TestCase):
         self.assertIn("inference-start", log)
         self.assertIn("inference-done", log)
         self.assertRegex(log, r"\[BPU\] ratio=37%")
+        self.assertRegex(log, r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2} \[BPU\]")
         self.assertRegex(log, r"\[BPU_SUMMARY\] samples=\d+ average=37\.0% peak=37%")
+        self.assertEqual(result.stderr, "")
 
     def test_returns_wrapped_command_status(self):
         result, log = self.run_wrapper(["bash", "-c", "echo failed-command; sleep 0.08; exit 7"])
@@ -106,6 +108,31 @@ class BpuMonitorTests(unittest.TestCase):
             finally:
                 if process.poll() is None:
                     process.kill()
+
+    def test_fast_command_emits_empty_summary(self):
+        result, log = self.run_wrapper(["bash", "-c", "true"])
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("[BPU_SUMMARY] samples=0 average=n/a peak=n/a", log)
+        self.assertEqual(result.stderr, "")
+
+    def test_rejects_unwritable_log_before_running_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_dir = Path(tmp) / "a-directory"
+            log_dir.mkdir()
+            marker = Path(tmp) / "ran"
+            ratio_file = Path(tmp) / "ratio"
+            ratio_file.write_text("37\n", encoding="utf-8")
+            env = os.environ.copy()
+            env["BPU_RATIO_FILE"] = str(ratio_file)
+            result = subprocess.run(
+                ["bash", str(SCRIPT), "--log", str(log_dir), "--", "bash", "-c", f"echo ran > {marker}"],
+                text=True,
+                capture_output=True,
+                env=env,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Unable to initialize log", result.stderr)
+            self.assertFalse(marker.exists())
 
 
 if __name__ == "__main__":
