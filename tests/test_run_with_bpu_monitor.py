@@ -1,6 +1,5 @@
 from pathlib import Path
 import os
-import re
 import subprocess
 import tempfile
 import unittest
@@ -55,6 +54,54 @@ class BpuMonitorTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("BPU ratio file is not readable", result.stderr)
             self.assertNotIn("should-not-run", result.stdout)
+
+    def test_excludes_spoofed_bpu_lines_from_summary(self):
+        result, log = self.run_wrapper(
+            ["bash", "-c", "echo '[BPU] ratio=99%'; sleep 0.12"]
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("[BPU] ratio=99%", log)
+        self.assertRegex(log, r"\[BPU_SUMMARY\] samples=\d+ average=37\.0% peak=37%")
+
+    def test_rejects_missing_operands_and_invalid_interval(self):
+        for args in (("--log",), ("--interval", "0"), ("--interval", "nope")):
+            result = subprocess.run(
+                ["bash", str(SCRIPT), *args], text=True, capture_output=True
+            )
+            self.assertEqual(result.returncode, 2, args)
+            self.assertIn("Usage:", result.stderr, args)
+
+    def test_terminating_wrapper_cleans_up_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            ratio_file = tmp_path / "ratio"
+            ratio_file.write_text("37\n", encoding="utf-8")
+            log = tmp_path / "combined.log"
+            marker = tmp_path / "marker"
+            env = os.environ.copy()
+            env["BPU_RATIO_FILE"] = str(ratio_file)
+            process = subprocess.Popen(
+                [
+                    "bash", str(SCRIPT), "--log", str(log), "--interval", "0.02", "--",
+                    "bash", "-c", f"trap 'echo orphan > {marker}' TERM; sleep 10",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+            )
+            try:
+                import time
+                time.sleep(0.15)
+                process.terminate()
+                process.wait(timeout=2)
+                process.communicate(timeout=1)
+                self.assertNotEqual(process.returncode, 0)
+                time.sleep(0.15)
+                self.assertFalse(marker.exists())
+            finally:
+                if process.poll() is None:
+                    process.kill()
 
 
 if __name__ == "__main__":

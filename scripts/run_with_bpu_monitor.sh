@@ -9,14 +9,24 @@ log_path=""
 interval="0.2"
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --log) log_path="${2:-}"; shift 2 ;;
-    --interval) interval="${2:-}"; shift 2 ;;
+    --log)
+      if [[ $# -lt 2 || -z "$2" ]]; then usage; exit 2; fi
+      log_path="$2"; shift 2 ;;
+    --interval)
+      if [[ $# -lt 2 || -z "$2" ]]; then usage; exit 2; fi
+      interval="$2"; shift 2 ;;
     --) shift; break ;;
     *) usage; exit 2 ;;
   esac
 done
 
 if [[ -z "$log_path" || $# -eq 0 ]]; then
+  usage
+  exit 2
+fi
+
+if [[ ! "$interval" =~ ^([0-9]+([.][0-9]+)?|[.][0-9]+)$ ]] || ! awk -v value="$interval" 'BEGIN { exit !(value > 0) }'; then
+  echo "Interval must be a positive number: $interval" >&2
   usage
   exit 2
 fi
@@ -37,16 +47,38 @@ fi
 mkdir -p "$(dirname "$log_path")"
 : > "$log_path"
 
+samples_file="$(mktemp)"
+output_file="$(mktemp)"
+command_pid=""
+monitor_pid=""
+interrupted=0
+
+cleanup() {
+  if [[ -n "$command_pid" ]]; then kill "$command_pid" 2>/dev/null || true; fi
+  if [[ -n "$monitor_pid" ]]; then kill "$monitor_pid" 2>/dev/null || true; fi
+  rm -f "$samples_file" "$output_file"
+}
+trap cleanup EXIT
+
+on_signal() {
+  interrupted=1
+  if [[ -n "$command_pid" ]]; then kill "$command_pid" 2>/dev/null || true; fi
+  if [[ -n "$monitor_pid" ]]; then kill "$monitor_pid" 2>/dev/null || true; fi
+}
+trap on_signal INT TERM
+
 run_session() {
-  local command_pid monitor_pid command_status
-  "$@" &
+  local command_status
+  "$@" >"$output_file" 2>&1 &
   command_pid=$!
 
   (
     while kill -0 "$command_pid" 2>/dev/null; do
       ratio="$(tr -d '[:space:]' < "$ratio_file")"
       if [[ "$ratio" =~ ^[0-9]+$ ]]; then
-        printf '%s [BPU] ratio=%s%%\n' "$(date --iso-8601=milliseconds)" "$ratio"
+        line="$(printf '%s [BPU] ratio=%s%%' "$(date --iso-8601=milliseconds)" "$ratio")"
+        printf '%s\n' "$line" >> "$samples_file"
+        printf '%s\n' "$line" | tee -a "$log_path"
       fi
       sleep "$interval"
     done
@@ -57,15 +89,17 @@ run_session() {
   wait "$command_pid"
   command_status=$?
   wait "$monitor_pid" 2>/dev/null || true
-  trap - INT TERM EXIT
+  command_pid=""
+  monitor_pid=""
   return "$command_status"
 }
 
-run_session "$@" 2>&1 | tee "$log_path"
-command_status=${PIPESTATUS[0]}
+run_session "$@"
+command_status=$?
+cat "$output_file" | tee -a "$log_path"
 
 awk -F'ratio=|%' '
-  /\[BPU\] ratio=/ {
+  {
     value = $2 + 0
     sum += value
     count += 1
@@ -77,6 +111,10 @@ awk -F'ratio=|%' '
     else
       print "[BPU_SUMMARY] samples=0 average=n/a peak=n/a"
   }
-' "$log_path" | tee -a "$log_path"
+' "$samples_file" | tee -a "$log_path"
+
+if [[ "$interrupted" -eq 1 ]]; then
+  exit 143
+fi
 
 exit "$command_status"
